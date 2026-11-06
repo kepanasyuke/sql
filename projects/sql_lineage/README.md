@@ -1,0 +1,65 @@
+# sql-lineage — lineage и анализ влияния по SQL-скриптам
+
+Инструмент отвечает на два вопроса сопровождения данных: **откуда взялась
+колонка** и **что сломается, если таблица не пришла**. Полноценный SQL-парсер не
+используется: свой токенизатор + разбор структуры запроса (CTE, источники,
+SELECT-список) без единой внешней зависимости.
+
+## Что умеет
+
+- разбирает скрипт на утверждения: `CREATE TABLE ... AS`, `CREATE VIEW ... AS`,
+  `INSERT INTO ... SELECT`, имя витрины берёт из DDL или из `-- name: mart.x`;
+- разворачивает вложенные CTE в реальные таблицы-источники;
+- строит **табличный** и **колоночный** lineage (через CTE, до базовой таблицы);
+- `impact`: прямые и транзитивные потребители, витрины-листья, затронутые колонки;
+- проверяет граф на циклы (топологический порядок);
+- экспорт в JSON и Graphviz DOT.
+
+## Запуск
+
+```bash
+python -m projects.sql_lineage.cli parse sql/demo.sql --output lineage.json
+python -m projects.sql_lineage.cli impact sql/demo.sql --table mart.fct_account_turnover_daily
+python -m projects.sql_lineage.cli dot sql/demo.sql > lineage.dot   # dot -Tpng lineage.dot -o lineage.png
+```
+
+```
+таблица: mart.fct_account_turnover_daily
+  прямые потребители: mart.client_turnover
+  все потребители:    mart.client_score, mart.client_turnover
+  витрины на выходе:  mart.client_score
+  затронуто колонок:  3
+```
+
+`impact` возвращает код 1, если у таблицы нет потребителей — удобно как гейт в
+CI: «новая витрина ни на что не влияет» обычно означает опечатку в имени.
+
+## Как это устроено
+
+```
+sql ──tokenize──► [Token] ──parse_query──► Query(ctes, sources, outputs)
+                                              │
+                                  build_model │ (разворот CTE + трассировка колонок)
+                                              ▼
+                                     LineageModel(tables, table_edges, column_edges)
+                                              │
+                            impact / upstream / to_dot / to_dict
+```
+
+Ограничения (сознательные): не разбираются `UPDATE`/`MERGE`, подзапросы в
+`FROM` не дают имени источника, выражения вида `a - b` дают lineage на уровне
+витрины, а не колонки. Для 95% аналитических скриптов этого достаточно, а
+стоимость поддержки на порядок ниже, чем у полноценного парсера.
+
+## Тесты
+
+```bash
+python -m pytest projects/sql_lineage -q
+```
+
+Проверяется: токенизация с комментариями и строками, разбор двух CTE, трассировка
+колонки через два уровня CTE, транзитивное влияние на витрины, топологический
+порядок и экспорт.
+
+**В резюме:** «sql-lineage — парсер SQL и анализ влияния изменений на витрины
+(свой токенизатор, колоночный lineage через CTE, JSON/DOT, без зависимостей)».

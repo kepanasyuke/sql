@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "portfolio"
+version = "1.0.0"
+description = "10 pet-проектов: данные, SQL, backend, DevOps, аналитика (только стандартная библиотека Python)"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools]
+packages = [
+    "projects",
+    "projects.sql_lineage",
+    "projects.recon_kit",
+    "projects.etl_watermark",
+    "projects.bank_metrics_api",
+    "projects.logwatch",
+    "projects.csv_profiler",
+    "projects.mini_orchestrator",
+    "projects.stream_replay",
+    "projects.sql_migrations",
+    "projects.perf_lab",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["projects"]
+addopts = "-q"
