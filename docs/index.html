@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PostgreSQL под капотом — и 10 инструментов, которые с ним работают</title>
+<meta name="description" content="Анимированная карта портфолио: путь SQL-запроса в PostgreSQL, B-tree, MVCC, планировщик и десять инструментов для работы с данными.">
+<style>
+  :root {
+    --pg: #336791;
+    --pg-light: #4a86b8;
+    --bg: #0b1220;
+    --panel: #121d2f;
+    --panel-2: #16243a;
+    --line: #24344c;
+    --text: #e6edf7;
+    --muted: #93a4bd;
+    --accent: #6ee7b7;
+    --warn: #fbbf24;
+    --radius: 16px;
+    --mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    margin: 0;
+    background:
+      radial-gradient(1200px 600px at 80% -10%, rgba(51, 103, 145, .38), transparent 60%),
+      radial-gradient(900px 500px at 0% 20%, rgba(110, 231, 183, .10), transparent 55%),
+      var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .wrap { width: min(1120px, 92vw); margin: 0 auto; }
+
+  /* ---------- навигация ---------- */
+  .topbar {
+    position: sticky; top: 0; z-index: 20;
+    backdrop-filter: blur(10px);
+    background: rgba(11, 18, 32, .82);
+    border-bottom: 1px solid var(--line);
+  }
+  .topbar .wrap { display: flex; align-items: center; gap: 18px; height: 60px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: .2px; }
+  .brand svg { width: 26px; height: 26px; }
+  .nav { margin-left: auto; display: flex; gap: 18px; flex-wrap: wrap; }
+  .nav a { color: var(--muted); font-size: 14px; }
+  .nav a:hover { color: var(--text); text-decoration: none; }
+  @media (max-width: 720px) { .nav { display: none; } }
+
+  /* ---------- обложка ---------- */
+  .hero-grid { display: grid; grid-template-columns: 1.15fr .85fr; gap: 34px; align-items: center; }
+  @media (max-width: 900px) { .hero-grid { grid-template-columns: 1fr; } }
+  .plan-card {
+    border: 1px solid var(--line); border-radius: 18px; overflow: hidden;
+    background: linear-gradient(180deg, #16243a, #101a2b);
+    box-shadow: 0 30px 60px -40px rgba(51, 103, 145, .9);
+  }
+  .plan-head {
+    display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+    border-bottom: 1px solid var(--line); font-family: var(--mono); font-size: 12px; color: var(--muted);
+  }
+  .plan-dot { width: 8px; height: 8px; border-radius: 50%; background: #34506f; }
+  .plan-dot.g { background: #3d6d58; }
+  .plan-dot.y { background: #6d5f34; }
+  .plan-body { padding: 14px; font-family: var(--mono); font-size: 11.5px; }
+  .plan-row { display: grid; grid-template-columns: 18px 1fr 62px; gap: 8px; align-items: center; padding: 5px 0; color: #b9c7da; }
+  .plan-row .bar { height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--pg), var(--pg-light)); width: var(--w, 60%); animation: fill 3.6s ease-in-out infinite; }
+  .plan-row:nth-child(2) .bar { --w: 82%; animation-delay: .15s; }
+  .plan-row:nth-child(3) .bar { --w: 54%; animation-delay: .3s; }
+  .plan-row:nth-child(4) .bar { --w: 71%; animation-delay: .45s; }
+  .plan-row:nth-child(5) .bar { --w: 38%; animation-delay: .6s; }
+  .plan-row .cost { color: var(--muted); text-align: right; }
+  @keyframes fill { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+  .plan-foot { padding: 10px 14px; border-top: 1px solid var(--line); font-family: var(--mono); font-size: 11.5px; color: var(--accent); }
+
+  header.hero { padding: 72px 0 40px; }
+  .kicker {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: 12px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--accent); border: 1px solid rgba(110, 231, 183, .35);
+    background: rgba(110, 231, 183, .08); padding: 6px 12px; border-radius: 999px;
+  }
+  h1 { font-size: clamp(30px, 4.6vw, 52px); line-height: 1.14; margin: 20px 0 14px; letter-spacing: -.5px; }
+  h1 .accent { color: var(--accent); }
+  .lede { font-size: clamp(16px, 1.6vw, 19px); color: var(--muted); max-width: 62ch; margin: 0 0 28px; }
+
+  .hero-actions { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 38px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 11px 18px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--panel); color: var(--text); font-weight: 600; font-size: 15px;
+    transition: transform .18s ease, border-color .18s ease, background .18s ease;
+  }
+  .btn:hover { transform: translateY(-2px); border-color: var(--pg-light); text-decoration: none; }
+  .btn.primary { background: linear-gradient(135deg, var(--pg), #26506f); border-color: transparent; }
+
+  /* ---------- общая панель ---------- */
+  .panel {
+    background: linear-gradient(180deg, var(--panel), var(--panel-2));
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 22px;
+  }
+
+  section { padding: 46px 0; }
+  h2 { font-size: clamp(22px, 2.6vw, 32px); margin: 0 0 10px; letter-spacing: -.3px; }
+  .section-lede { color: var(--muted); margin: 0 0 26px; max-width: 70ch; }
+
+  /* ---------- путь запроса ---------- */
+  .flow { position: relative; padding: 18px 6px 8px; }
+  .flow svg { width: 100%; height: auto; display: block; }
+  .flow-legend { display: flex; gap: 18px; flex-wrap: wrap; color: var(--muted); font-size: 13px; margin-top: 10px; }
+  .dot { fill: var(--accent); filter: drop-shadow(0 0 6px rgba(110, 231, 183, .9)); }
+  .node-label { fill: var(--text); font-size: 13px; font-weight: 600; }
+  .node-sub { fill: var(--muted); font-size: 11px; }
+  .node-box { fill: #16243a; stroke: var(--line); }
+  .pulse-line { stroke: var(--pg-light); stroke-width: 2; fill: none; stroke-dasharray: 6 10; animation: dash 2.4s linear infinite; }
+  @keyframes dash { to { stroke-dashoffset: -32; } }
+
+  /* ---------- сетка механизмов ---------- */
+  .mech-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }
+  .mech h3 { margin: 0 0 6px; font-size: 17px; }
+  .mech p { margin: 0; color: var(--muted); font-size: 14.5px; }
+  .mech .svgbox { margin: 6px 0 14px; }
+  .mech svg { width: 100%; height: auto; display: block; }
+
+  .tag {
+    display: inline-block; font-family: var(--mono); font-size: 11.5px;
+    color: var(--accent); background: rgba(110, 231, 183, .08);
+    border: 1px solid rgba(110, 231, 183, .25); border-radius: 6px; padding: 2px 7px; margin-top: 10px;
+  }
+
+  /* ---------- секвенс-скан против индекса ---------- */
+  .scanbars { display: grid; gap: 10px; margin-top: 8px; }
+  .scanrow { display: grid; grid-template-columns: 92px 1fr 74px; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
+  .cells { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 2px; height: 16px; }
+  .cell { background: #1d2f47; border-radius: 2px; }
+  .seq .cell { animation: seqscan 4.2s linear infinite; }
+  .seq .cell:nth-child(n) { animation-delay: calc(var(--i) * 22ms); }
+  @keyframes seqscan { 0%, 70% { background: #1d2f47; } 72%, 78% { background: var(--warn); } 80%, 100% { background: #1d2f47; } }
+  .idx .cell { animation: idxscan 4.2s linear infinite; }
+  .idx .cell:nth-child(odd) { animation-delay: 20ms; }
+  @keyframes idxscan { 0%, 12% { background: #1d2f47; } 14%, 22% { background: var(--accent); } 24%, 100% { background: #1d2f47; } }
+  .cost { font-family: var(--mono); color: var(--text); }
+
+  /* ---------- B-tree ---------- */
+  .btree .edge { stroke: var(--line); stroke-width: 2; fill: none; }
+  .btree .node { fill: #16243a; stroke: var(--line); stroke-width: 1.5; }
+  .btree .key { fill: var(--text); font-size: 11px; font-family: var(--mono); }
+  .btree .path { stroke: var(--accent); stroke-width: 2.5; fill: none; stroke-dasharray: 260; stroke-dashoffset: 260; animation: trace 4s ease-in-out infinite; }
+  @keyframes trace { 0% { stroke-dashoffset: 260; } 55%, 80% { stroke-dashoffset: 0; } 100% { stroke-dashoffset: -260; } }
+  .btree .hit { fill: var(--accent); animation: hit 4s ease-in-out infinite; }
+  @keyframes hit { 0%, 55% { r: 4; opacity: .25; } 65%, 90% { r: 7; opacity: 1; } 100% { r: 4; opacity: .25; } }
+
+  /* ---------- MVCC ---------- */
+  .mvcc { display: grid; gap: 8px; margin-top: 6px; }
+  .tuple {
+    display: grid; grid-template-columns: 54px 1fr auto; gap: 8px; align-items: center;
+    border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; font-size: 13px;
+    background: #142135;
+  }
+  .tuple .ver { font-family: var(--mono); color: var(--accent); }
+  .tuple .xid { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+  .tuple.t1 { animation: vis 6s ease-in-out infinite; }
+  .tuple.t2 { animation: vis 6s ease-in-out infinite 2s; }
+  .tuple.t3 { animation: vis 6s ease-in-out infinite 4s; }
+  @keyframes vis { 0%, 20% { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(110,231,183,.25) inset; } 40%, 100% { border-color: var(--line); box-shadow: none; } }
+
+  /* ---------- карточки проектов ---------- */
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+  .card {
+    position: relative; overflow: hidden;
+    display: flex; flex-direction: column; gap: 10px;
+    background: linear-gradient(180deg, rgba(22, 36, 58, .9), rgba(18, 29, 47, .9));
+    border: 1px solid var(--line); border-radius: 14px; padding: 18px 18px 16px;
+    transition: transform .2s ease, border-color .2s ease, box-shadow .2s ease;
+    opacity: 0; transform: translateY(14px);
+  }
+  .card.in { opacity: 1; transform: none; transition: opacity .5s ease, transform .5s ease, border-color .2s ease; }
+  .card::after {
+    content: ""; position: absolute; inset: -40% -60% auto auto; width: 220px; height: 220px;
+    background: radial-gradient(circle, rgba(51, 103, 145, .45), transparent 65%);
+    opacity: 0; transition: opacity .25s ease;
+  }
+  .card:hover { transform: translateY(-4px); border-color: var(--pg-light); box-shadow: 0 16px 40px -22px rgba(51, 103, 145, .9); }
+  .card:hover::after { opacity: 1; }
+  .card .num { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .card h3 { margin: 0; font-size: 18px; }
+  .card h3 a { color: var(--text); }
+  .card h3 a:hover { color: var(--accent); text-decoration: none; }
+  .card p { margin: 0; color: var(--muted); font-size: 14.5px; }
+  .card .pg {
+    margin-top: auto; font-size: 13px; color: #b9c7da;
+    border-top: 1px dashed var(--line); padding-top: 10px;
+  }
+  .card .pg b { color: var(--accent); font-weight: 600; }
+  .card .icon { width: 30px; height: 30px; }
+  .card .icon path, .card .icon circle, .card .icon rect { stroke: var(--pg-light); stroke-width: 1.8; fill: none; }
+  .card:hover .icon path, .card:hover .icon circle, .card:hover .icon rect { stroke: var(--accent); }
+
+  /* ---------- таблица соответствий ---------- */
+  table.map { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+  table.map th, table.map td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.map th { color: var(--muted); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; }
+  table.map code { font-family: var(--mono); font-size: 13px; color: var(--accent); }
+  .table-scroll { overflow-x: auto; }
+
+  footer { border-top: 1px solid var(--line); margin-top: 40px; padding: 26px 0 40px; color: var(--muted); font-size: 13.5px; }
+  footer .wrap { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+
+  /* ---------- режим предпросмотра (?only=mech) — для скриншотов ---------- */
+  body[class*="only-"] .topbar,
+  body[class*="only-"] header.hero,
+  body[class*="only-"] footer { display: none; }
+  body.only-flow section:not(#flow),
+  body.only-mech section:not(#mech),
+  body.only-projects section:not(#projects),
+  body.only-map section:not(#map) { display: none; }
+  body[class*="only-"] section { padding: 26px 0 10px; }
+
+  /* ---------- доступность ---------- */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+    .card { opacity: 1; transform: none; }
+    html { scroll-behavior: auto; }
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="wrap">
+    <span class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true">
+        <ellipse cx="16" cy="9" rx="11" ry="4.5" fill="none" stroke="#4a86b8" stroke-width="1.8"/>
+        <path d="M5 9v14c0 2.5 5 4.5 11 4.5s11-2 11-4.5V9" fill="none" stroke="#4a86b8" stroke-width="1.8"/>
+        <path d="M5 16c0 2.5 5 4.5 11 4.5s11-2 11-4.5" fill="none" stroke="#336791" stroke-width="1.6"/>
+        <circle cx="16" cy="9" r="2.2" fill="#6ee7b7"/>
+      </svg>
+      sql / portfolio
+    </span>
+    <nav class="nav">
+      <a href="#flow">Путь запроса</a>
+      <a href="#mech">Механизмы</a>
+      <a href="#projects">10 проектов</a>
+      <a href="#map">Связка</a>
+    </nav>
+  </div>
+</div>
+
+<header class="hero">
+  <div class="wrap hero-grid">
+    <div class="hero-text">
+    <span class="kicker">PostgreSQL · анимированная карта портфолио</span>
+    <h1>Как PostgreSQL обрабатывает запрос — <span class="accent">и где в этом процессе живут десять инструментов</span></h1>
+    <p class="lede">
+      Сначала — что происходит внутри базы, когда вы отправляете <code>SELECT</code>: парсер, планировщик,
+      executor, страницы heap и индекса, версии строк. Потом — десять проектов портфолио и то,
+      к какому механизму Postgres каждый из них привязан.
+    </p>
+    <div class="hero-actions">
+      <a class="btn primary" href="#projects">Смотреть проекты</a>
+      <a class="btn" href="#mech">Разобрать механизмы</a>
+      <a class="btn" href="../README.md">README репозитория</a>
+    </div>
+    </div>
+
+    <aside class="plan-card" aria-label="Пример плана запроса">
+      <div class="plan-head">
+        <span class="plan-dot"></span><span class="plan-dot g"></span><span class="plan-dot y"></span>
+        EXPLAIN (ANALYZE, BUFFERS)
+      </div>
+      <div class="plan-body">
+        <div class="plan-row"><span>1</span><span class="bar"></span><span class="cost">12.4 ms</span></div>
+        <div class="plan-row"><span>2</span><span class="bar"></span><span class="cost">8.1 ms</span></div>
+        <div class="plan-row"><span>3</span><span class="bar"></span><span class="cost">5.7 ms</span></div>
+        <div class="plan-row"><span>4</span><span class="bar"></span><span class="cost">3.2 ms</span></div>
+        <div class="plan-row"><span>5</span><span class="bar"></span><span class="cost">1.8 ms</span></div>
+      </div>
+      <div class="plan-foot">Index Scan · rows=10 · cost 0..12</div>
+    </aside>
+  </div>
+</header>
+
+<section id="flow">
+  <div class="wrap">
+    <h2>Путь одного запроса</h2>
+    <p class="section-lede">
+      Клиент отправляет текст — база превращает его в дерево, переписывает, выбирает план по стоимости
+      и отдаёт executor'у, который читает страницы. Каждая проверка качества данных в портфолио
+      вмешивается в один из этих шагов.
+    </p>
+
+    <div class="panel flow">
+      <svg viewBox="0 0 1000 200" role="img" aria-label="Схема обработки SQL-запроса в PostgreSQL: клиент, парсер, rewrite, планировщик, executor, данные">
+        <defs>
+          <linearGradient id="nodeGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#1a2b44"/>
+            <stop offset="100%" stop-color="#142135"/>
+          </linearGradient>
+        </defs>
+
+        <path class="pulse-line" d="M60 100 H940"/>
+
+        <g>
+          <rect class="node-box" x="20" y="70" width="120" height="60" rx="10" fill="url(#nodeGrad)"/>
+          <text class="node-label" x="80" y="96" text-anchor="middle">Клиент</text>
+          <text class="node-sub" x="80" y="114" text-anchor="middle">SQL-текст</text>
+        </g>
+        <g>
+          <rect class="node-box" x="180" y="70" width="130" height="60" rx="10" fill="url(#nodeGrad)"/>
+          <text class="node-label" x="245" y="96" text-anchor="middle">Парсер</text>
+          <text class="node-sub" x="245" y="114" text-anchor="middle">дерево разбора</text>
+        </g>
+        <g>
+          <rect class="node-box" x="350" y="70" width="130" height="60" rx="10" fill="url(#nodeGrad)"/>
+          <text class="node-label" x="415" y="96" text-anchor="middle">Rewrite</text>
+          <text class="node-sub" x="415" y="114" text-anchor="middle">правила, views</text>
+        </g>
+        <g>
+          <rect class="node-box" x="520" y="70" width="150" height="60" rx="10" fill="url(#nodeGrad)"/>
+          <text class="node-label" x="595" y="96" text-anchor="middle">Планировщик</text>
+          <text class="node-sub" x="595" y="114" text-anchor="middle">выбор по стоимости</text>
+        </g>
+        <g>
+          <rect class="node-box" x="710" y="70" width="130" height="60" rx="10" fill="url(#nodeGrad)"/>
+          <text class="node-label" x="775" y="96" text-anchor="middle">Executor</text>
+          <text class="node-sub" x="775" y="114" text-anchor="middle">Seq / Index Scan</text>
+        </g>
+        <g>
+          <rect class="node-box" x="880" y="70" width="100" height="60" rx="10" fill="url(#nodeGrad)"/>
+          <text class="node-label" x="930" y="96" text-anchor="middle">Данные</text>
+          <text class="node-sub" x="930" y="114" text-anchor="middle">heap + index</text>
+        </g>
+
+        <circle class="dot" r="4.5">
+          <animateMotion dur="6s" repeatCount="indefinite" keyPoints="0;1" keyTimes="0;1" calcMode="linear"
+            path="M60 100 H940"/>
+        </circle>
+        <circle class="dot" r="3" opacity=".55">
+          <animateMotion dur="6s" begin="2s" repeatCount="indefinite" path="M60 100 H940"/>
+        </circle>
+        <circle class="dot" r="3" opacity=".35">
+          <animateMotion dur="6s" begin="4s" repeatCount="indefinite" path="M60 100 H940"/>
+        </circle>
+      </svg>
+
+      <div class="flow-legend">
+        <span>· текст запроса превращается в дерево один раз — дальше работают структуры</span>
+        <span>· стоимость плана считается по статистике таблиц</span>
+        <span>· страницы heap и индекса читаются в buffer cache</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="mech">
+  <div class="wrap">
+    <h2>Три механизма, на которых всё держится</h2>
+    <p class="section-lede">
+      Проверки качества данных бессмысленны, если не понимать, как база хранит и находит строки.
+      Ниже — то, что чаще всего объясняют на собеседовании и на что опираются проекты.
+    </p>
+
+    <div class="mech-grid">
+
+      <div class="panel mech">
+        <h3>B-tree: три чтения вместо перебора</h3>
+        <p>Индексное чтение опускается по дереву от корня к листу. Отсюда требование к DQ-проверкам: предикат должен работать с индексируемой колонкой, а не с функцией от неё.</p>
+        <div class="svgbox">
+          <svg class="btree" viewBox="0 0 300 150" role="img" aria-label="Поиск по B-tree: путь от корня к листу">
+            <path class="edge" d="M150 34 L80 70 M150 34 L150 70 M150 34 L220 70"/>
+            <path class="edge" d="M80 88 L42 122 M80 88 L118 122"/>
+            <path class="edge" d="M220 88 L182 122 M220 88 L258 122"/>
+            <path class="path" d="M150 34 L220 70 L258 122"/>
+
+            <rect class="node" x="120" y="18" width="60" height="20" rx="5"/>
+            <text class="key" x="150" y="32" text-anchor="middle">50 | 150</text>
+
+            <rect class="node" x="52" y="70" width="56" height="18" rx="5"/>
+            <text class="key" x="80" y="83" text-anchor="middle">10 | 30</text>
+            <rect class="node" x="122" y="70" width="56" height="18" rx="5"/>
+            <text class="key" x="150" y="83" text-anchor="middle">50 | 90</text>
+            <rect class="node" x="192" y="70" width="56" height="18" rx="5"/>
+            <text class="key" x="220" y="83" text-anchor="middle">150 | 210</text>
+
+            <circle class="node" cx="42" cy="126" r="6"/>
+            <circle class="node" cx="118" cy="126" r="6"/>
+            <circle class="node" cx="182" cy="126" r="6"/>
+            <circle class="node" cx="258" cy="126" r="6"/>
+            <circle class="hit" cx="258" cy="126" r="4"/>
+          </svg>
+        </div>
+        <span class="tag">CREATE INDEX · EXPLAIN ANALYZE</span>
+      </div>
+
+      <div class="panel mech">
+        <h3>Seq Scan против Index Scan</h3>
+        <p>Планировщик выбирает по стоимости: если нужна почти вся таблица, дешевле прочитать её подряд. Поэтому «индекс есть» не значит «индекс используется» — это видно в плане.</p>
+        <div class="scanbars">
+          <div class="scanrow seq">
+            <span>Seq Scan</span>
+            <span class="cells">
+              <i class="cell" style="--i:0"></i><i class="cell" style="--i:1"></i><i class="cell" style="--i:2"></i><i class="cell" style="--i:3"></i><i class="cell" style="--i:4"></i><i class="cell" style="--i:5"></i><i class="cell" style="--i:6"></i><i class="cell" style="--i:7"></i><i class="cell" style="--i:8"></i><i class="cell" style="--i:9"></i><i class="cell" style="--i:10"></i><i class="cell" style="--i:11"></i><i class="cell" style="--i:12"></i><i class="cell" style="--i:13"></i><i class="cell" style="--i:14"></i><i class="cell" style="--i:15"></i><i class="cell" style="--i:16"></i><i class="cell" style="--i:17"></i><i class="cell" style="--i:18"></i><i class="cell" style="--i:19"></i>
+            </span>
+            <span class="cost">cost 0..1840</span>
+          </div>
+          <div class="scanrow idx">
+            <span>Index Scan</span>
+            <span class="cells">
+              <i class="cell" style="--i:0"></i><i class="cell" style="--i:1"></i><i class="cell" style="--i:2"></i><i class="cell" style="--i:3"></i><i class="cell" style="--i:4"></i><i class="cell" style="--i:5"></i><i class="cell" style="--i:6"></i><i class="cell" style="--i:7"></i><i class="cell" style="--i:8"></i><i class="cell" style="--i:9"></i><i class="cell" style="--i:10"></i><i class="cell" style="--i:11"></i><i class="cell" style="--i:12"></i><i class="cell" style="--i:13"></i><i class="cell" style="--i:14"></i><i class="cell" style="--i:15"></i><i class="cell" style="--i:16"></i><i class="cell" style="--i:17"></i><i class="cell" style="--i:18"></i><i class="cell" style="--i:19"></i>
+            </span>
+            <span class="cost">cost 0..12</span>
+          </div>
+        </div>
+        <span class="tag">EXPLAIN (ANALYZE, BUFFERS)</span>
+      </div>
+
+      <div class="panel mech">
+        <h3>MVCC: у строки несколько версий</h3>
+        <p>UPDATE не перезаписывает строку, а создаёт новую версию. Каждая транзакция видит ту, что была актуальна на её снимок — поэтому читатели не блокируют писателей.</p>
+        <div class="mvcc">
+          <div class="tuple t1"><span class="ver">v1</span><span>balance = 1 000</span><span class="xid">xmin 100</span></div>
+          <div class="tuple t2"><span class="ver">v2</span><span>balance = 1 500</span><span class="xid">xmin 200</span></div>
+          <div class="tuple t3"><span class="ver">v3</span><span>balance = 1 200</span><span class="xid">xmin 300</span></div>
+        </div>
+        <span class="tag">xmin / xmax · VACUUM</span>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section id="projects">
+  <div class="wrap">
+    <h2>Десять инструментов</h2>
+    <p class="section-lede">
+      Каждый проект — рабочий CLI с тестами. У каждого в карточке указано, с каким механизмом
+      PostgreSQL он работает: это и есть ответ на вопрос «а зачем это в продакшене».
+    </p>
+
+    <div class="cards">
+
+      <article class="card">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h6v4H4zM14 6h6v4h-6zM9 14h6v4H9z"/><path d="M7 10v4h10v-4M12 10v4"/></svg>
+        <span class="num">01</span>
+        <h3><a href="../projects/sql_lineage/README.md">sql-lineage</a></h3>
+        <p>Строит карту зависимостей по SQL: откуда взялась колонка и что сломается, если таблица не пришла.</p>
+        <div class="pg"><b>PostgreSQL:</b> зависимости объектов, <code>pg_depend</code>, чтение планов <code>EXPLAIN</code></div>
+      </article>
+
+      <article class="card">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="8" height="16" rx="1"/><rect x="13" y="4" width="8" height="16" rx="1"/><path d="M6 8h2M6 12h2M16 8h2M16 16h2"/></svg>
+        <span class="num">02</span>
+        <h3><a href="../projects/recon_kit/README.md">recon-kit</a></h3>
+        <p>Сверяет источник и приёмник после загрузки: потерянные строки, лишние, изменённые значения.</p>
+        <div class="pg"><b>PostgreSQL:</b> сверка через <code>FULL JOIN</code> и <code>EXCEPT</code>, сравнение нормализованных значений</div>
+      </article>
+
+      <article class="card">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v6M12 15v6M5 12h6M13 12h6"/><circle cx="12" cy="12" r="2.5"/></svg>
+        <span class="num">03</span>
+        <h3><a href="../projects/etl_watermark/README.md">etl-watermark</a></h3>
+        <p>Загрузка, которую можно перезапускать: обновляет строки по бизнес-ключу и помнит, до какой даты приняла данные.</p>
+        <div class="pg"><b>PostgreSQL:</b> <code>INSERT … ON CONFLICT DO UPDATE</code>, транзакция на батч, журнал прогонов</div>
+      </article>
+
+      <article class="card">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h10M4 17h6"/><circle cx="18" cy="16" r="3"/></svg>
+        <span class="num">04</span>
+        <h3><a href="../projects/bank_metrics_api/README.md">bank-metrics-api</a></h3>
+        <p>HTTP API с готовыми срезами: обороты клиента, сводка портфеля, статус проверок качества.</p>
+        <div class="pg"><b>PostgreSQL:</b> пул соединений, <code>pg_stat_activity</code>, агрегаты вместо чтения всей таблицы</div>
+      </article>
+
+      <article class="card">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M4 10h16M4 15h9M4 20h6"/><path d="M16 15l2 2 3-3"/></svg>
+        <span class="num">05</span>
+        <h3><a href="../projects/logwatch/README.md">logwatch</a></h3>
+        <p>Разбирает логи nginx и приложения, считает пороги по окну и склеивает повторы в один алерт.</p>
+        <div class="pg"><b>PostgreSQL:</b> те же приёмы, что для <code>pg_stat_activity</code> и <code>wait_event</code> — окно и дедупликация</div>
+      </article>
+
+      <article class="card">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h4"/></svg>
+        <span class="num">06</span>
+        <h3><a href="../projects/csv_profiler/README.md">csv-profiler</a></h3>
+        <p>Профиль выгрузки: типы, доля NULL, квантили, поиск ИНН и карт, готовые DQ-проверки с порогами.</p>
+        <div class="pg"><b>PostgreSQL:</b> то же, что даёт <code>information_schema</code> и <code>pg_stats</code> — но до загрузки в базу</div>
+      </article>
+
+      <article class="card">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="6" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="18" r="2"/><path d="M7 6h6l-4 6h7l-4 6"/></svg>
+        <span class="num">07</span>
+        <h3><a href="../projects/mini_orchestrator/README.md">mini-orchestrator</a></h3>
+        <p>Запускает шаги по графу зависимостей: параллелит независимые, повторяет упавшие, ведёт журнал.</p>
+        <div class="pg"><b>PostgreSQL:</b> <code>pg_advisory_lock</code> для «один прогон за раз», состояния задач в таблице</div>
+      </article>
+
+      <article class="card">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2-6 3 12 2-6h7"/></svg>
+        <span class="num">08</span>
+        <h3><a href="../projects/stream_replay/README.md">stream-replay</a></h3>
+        <p>Считает агрегаты по окнам времени события, отбрасывает дубликаты и показывает, сколько событий опоздало.</p>
+        <div class="pg"><b>PostgreSQL:</b> логическая репликация и <code>pg_logical_slot_get_changes</code> — тот же поток «событие + время»</div>
+      </article>
+
+      <article class="card">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v5H5zM5 15h14v5H5z"/><path d="M12 9v6"/><path d="M9 12l3 3 3-3"/></svg>
+        <span class="num">09</span>
+        <h3><a href="../projects/sql_migrations/README.md">sql-migrations</a></h3>
+        <p>Применяет пронумерованные миграции атомарно и замечает, если уже применённый файл отредактировали.</p>
+        <div class="pg"><b>PostgreSQL:</b> DDL внутри транзакции, контрольные суммы в журнале, блокировка от параллельного применения</div>
+      </article>
+
+      <article class="card">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V9M10 20V4M16 20v-8M22 20V7"/></svg>
+        <span class="num">10</span>
+        <h3><a href="../projects/perf_lab/README.md">perf-lab</a></h3>
+        <p>Меряет варианты одного запроса на одних данных: p50/p95, вклад индекса, проверка что результат одинаковый.</p>
+        <div class="pg"><b>PostgreSQL:</b> <code>EXPLAIN (ANALYZE, BUFFERS)</code>, стоимость плана, выбор между seq и index scan</div>
+      </article>
+
+    </div>
+  </div>
+</section>
+
+<section id="map">
+  <div class="wrap">
+    <h2>Кто за что отвечает</h2>
+    <p class="section-lede">Быстрая таблица: задача — механизм Postgres — проект, который с этим работает.</p>
+    <div class="panel table-scroll">
+      <table class="map">
+        <thead>
+          <tr><th>Задача</th><th>Механизм PostgreSQL</th><th>Проект</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Понять, откуда цифра в отчёте</td><td>зависимости объектов, планы запросов</td><td><code>sql-lineage</code></td></tr>
+          <tr><td>Проверить, что загрузка не потеряла строки</td><td><code>FULL JOIN</code>, <code>EXCEPT</code>, сверка rowcount</td><td><code>recon-kit</code>, DQ-контур</td></tr>
+          <tr><td>Перезапускать загрузку без дублей</td><td><code>ON CONFLICT DO UPDATE</code>, транзакция</td><td><code>etl-watermark</code></td></tr>
+          <tr><td>Отдать цифры дашбордам</td><td>пул соединений, <code>pg_stat_activity</code></td><td><code>bank-metrics-api</code></td></tr>
+          <tr><td>Не спамить алертами при инциденте</td><td>окно, дедупликация по fingerprint</td><td><code>logwatch</code></td></tr>
+          <tr><td>Принять новый источник данных</td><td>профиль колонок вместо <code>pg_stats</code></td><td><code>csv-profiler</code></td></tr>
+          <tr><td>Запустить шаги обработки по порядку</td><td><code>pg_advisory_lock</code>, состояние в таблице</td><td><code>mini-orchestrator</code></td></tr>
+          <tr><td>Считать поток событий с опозданиями</td><td>логическое декодирование, event time</td><td><code>stream-replay</code></td></tr>
+          <tr><td>Менять схему безопасно</td><td>DDL в транзакции, контроль дрейфа</td><td><code>sql-migrations</code></td></tr>
+          <tr><td>Выбрать быстрый вариант запроса</td><td><code>EXPLAIN ANALYZE</code>, стоимость плана</td><td><code>perf-lab</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span>Анимации на CSS и SVG, без внешних библиотек и запросов в сеть — страница работает офлайн.</span>
+    <span>При <code>prefers-reduced-motion</code> анимация отключается.</span>
+  </div>
+</footer>
+
+<script>
+  (function () {
+    var only = new URLSearchParams(location.search).get("only");
+    if (only) {
+      document.body.classList.add("only-" + only);
+    }
+  })();
+
+  (function () {
+    var cards = document.querySelectorAll(".card");
+    if (!("IntersectionObserver" in window)) {
+      cards.forEach(function (card) { card.classList.add("in"); });
+      return;
+    }
+    var observer = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (entry.isIntersecting) {
+          entry.target.classList.add("in");
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.15 });
+    cards.forEach(function (card) { observer.observe(card); });
+  })();
+</script>
+
+</body>
+</html>

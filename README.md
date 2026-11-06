@@ -1,5 +1,12 @@
 # sql — 10 pet-проектов по данным, SQL и инфраструктуре
 
+<a href="https://kepanasyuke.github.io/sql/">
+  <img src="docs/screenshots/preview-hero.png" alt="Анимированная карта: путь SQL-запроса в PostgreSQL и десять инструментов" width="100%">
+</a>
+
+**Онлайн-версия карты:** https://kepanasyuke.github.io/sql/ · локально — файл `docs/index.html`
+(анимации на CSS и SVG, без зависимостей и запросов в сеть).
+
 ## Простыми словами
 
 Десять небольших инструментов под типовые задачи при работе с данными: понять,
@@ -21,6 +28,11 @@ python -m projects.logwatch.cli analyze --demo
 python -m projects.perf_lab.cli bench --rows 20000 --repeats 5
 ```
 
+**Визуальная карта:** [docs/index.html](docs/index.html) — анимированная
+страница о том, как PostgreSQL выполняет запрос (парсер, планировщик, executor,
+B-tree, MVCC), и где в этом процессе живёт каждый из десяти проектов. Работает
+офлайн, без зависимостей.
+
 ## Что внутри
 
 Каждый проект в этом репозитории — рабочий инструмент, а не заготовка: есть
@@ -31,6 +43,12 @@ CLI, тесты и README с разбором решений. Внешних з�
 ```bash
 python -m pytest -q          # 94 теста по всем проектам
 ```
+
+## Как это выглядит
+
+[![Карточки десяти проектов](docs/screenshots/preview-projects.png)](https://kepanasyuke.github.io/sql/#projects)
+
+[![Механизмы PostgreSQL: B-tree, seq scan против index scan, MVCC](docs/screenshots/preview-mech.png)](https://kepanasyuke.github.io/sql/#mech)
 
 ## Проекты
 
