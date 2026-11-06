@@ -51,17 +51,15 @@ class Rule:
     title: str = ""
 
     def matches(self, record: LogRecord) -> bool:
-        if self.statuses and record.status not in self.statuses:
-            return False
-        if self.status_at_least is not None and (record.status or 0) < self.status_at_least:
-            return False
-        if self.pattern and not re.search(self.pattern, record.raw, re.IGNORECASE):
-            return False
-        if self.min_level and record.severity_level < _level(self.min_level):
-            return False
-        if self.min_duration_ms is not None and (record.duration_ms or 0) < self.min_duration_ms:
-            return False
-        return True
+        """Все условия правила; одно выражение — один итоговый ответ."""
+        conditions = (
+            not self.statuses or record.status in self.statuses,
+            self.status_at_least is None or (record.status or 0) >= self.status_at_least,
+            not self.pattern or bool(re.search(self.pattern, record.raw, re.IGNORECASE)),
+            not self.min_level or record.severity_level >= _level(self.min_level),
+            self.min_duration_ms is None or (record.duration_ms or 0) >= self.min_duration_ms,
+        )
+        return all(conditions)
 
 
 def _level(name: str) -> int:
@@ -88,50 +86,54 @@ class RuleEngine:
         self._last_ts: datetime | None = None
 
     def _now(self, record: LogRecord) -> datetime:
-        if record.ts is not None:
-            self._last_ts = record.ts
-            return record.ts
-        self._last_ts = (self._last_ts or datetime.now(timezone.utc)) + timedelta(seconds=1)
-        return self._last_ts
+        moment = record.ts
+        if moment is None:
+            moment = (self._last_ts or datetime.now(timezone.utc)) + timedelta(seconds=1)
+        self._last_ts = moment
+        return moment
+
+    def _maybe_alert(self, rule: Rule, record: LogRecord, now: datetime) -> Alert | None:
+        """Алерт или None: окно, порог и дедупликация проверяются в одном месте."""
+        alert: Alert | None = None
+        if rule.matches(record):
+            state = self._state[rule.rule_id]
+            state.hits.append(now)
+            edge = now - timedelta(seconds=rule.window_seconds)
+            while state.hits and state.hits[0] < edge:
+                state.hits.popleft()
+
+            if len(state.hits) >= rule.min_count:
+                fingerprint = f"{rule.rule_id}|{record.fingerprint}"
+                last = state.last_alert.get(fingerprint)
+                if last is None or (now - last).total_seconds() >= rule.dedup_seconds:
+                    suppressed = state.suppressed.pop(fingerprint, 0)
+                    state.last_alert[fingerprint] = now
+                    alert = Alert(
+                        rule_id=rule.rule_id,
+                        severity=rule.severity,
+                        message=rule.title or rule.rule_id,
+                        fingerprint=record.fingerprint,
+                        count=len(state.hits),
+                        first_seen=state.hits[0].isoformat(timespec="seconds"),
+                        last_seen=now.isoformat(timespec="seconds"),
+                        suppressed=suppressed,
+                        sample=record.raw[:200],
+                    )
+                else:
+                    state.suppressed[fingerprint] = state.suppressed.get(fingerprint, 0) + 1
+                    self.counters["suppressed"] += 1
+        return alert
 
     def feed(self, record: LogRecord) -> list[Alert]:
         self.counters["events"] += 1
         now = self._now(record)
         produced: list[Alert] = []
         for rule in self.rules:
-            if not rule.matches(record):
-                continue
-            state = self._state[rule.rule_id]
-            state.hits.append(now)
-            edge = now - timedelta(seconds=rule.window_seconds)
-            while state.hits and state.hits[0] < edge:
-                state.hits.popleft()
-            if len(state.hits) < rule.min_count:
-                continue
-
-            fingerprint = f"{rule.rule_id}|{record.fingerprint}"
-            last = state.last_alert.get(fingerprint)
-            if last is not None and (now - last).total_seconds() < rule.dedup_seconds:
-                state.suppressed[fingerprint] = state.suppressed.get(fingerprint, 0) + 1
-                self.counters["suppressed"] += 1
-                continue
-
-            suppressed = state.suppressed.pop(fingerprint, 0)
-            state.last_alert[fingerprint] = now
-            alert = Alert(
-                rule_id=rule.rule_id,
-                severity=rule.severity,
-                message=rule.title or rule.rule_id,
-                fingerprint=record.fingerprint,
-                count=len(state.hits),
-                first_seen=state.hits[0].isoformat(timespec="seconds"),
-                last_seen=now.isoformat(timespec="seconds"),
-                suppressed=suppressed,
-                sample=record.raw[:200],
-            )
-            self.counters["alerts"] += 1
-            self.alerts.append(alert)
-            produced.append(alert)
+            alert = self._maybe_alert(rule, record, now)
+            if alert is not None:
+                self.counters["alerts"] += 1
+                self.alerts.append(alert)
+                produced.append(alert)
         return produced
 
     def feed_all(self, records: Iterable[LogRecord]) -> list[Alert]:

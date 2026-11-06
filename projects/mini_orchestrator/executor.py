@@ -113,12 +113,14 @@ class Executor:
                     states[name]["status"] = UPSTREAM_FAILED
                     states[name]["error"] = "зависимость завершилась с ошибкой"
                     self._record(run_id, name, states[name], started_at=_now())
-            if not runnable:
-                continue
-            with ThreadPoolExecutor(max_workers=min(self.max_workers, len(runnable))) as pool:
-                futures = {pool.submit(self._execute_task, self.dag.by_name(name), context): name for name in runnable}
-                for future, name in futures.items():
-                    states[name] = future.result()
+            if runnable:
+                with ThreadPoolExecutor(max_workers=min(self.max_workers, len(runnable))) as pool:
+                    futures = {
+                        pool.submit(self._execute_task, self.dag.by_name(name), context): name
+                        for name in runnable
+                    }
+                    for future, name in futures.items():
+                        states[name] = future.result()
 
         status = SUCCESS if all(state["status"] == SUCCESS for state in states.values()) else FAILED
         duration = int((time.perf_counter() - started) * 1000)
@@ -138,7 +140,9 @@ class Executor:
         clock = time.perf_counter()
         attempts = 0
         error: str | None = None
-        while attempts <= task.retries:
+        trace: str | None = None
+        state: dict | None = None
+        while attempts <= task.retries and state is None:
             attempts += 1
             try:
                 output = task.func(context) if task.func else None
@@ -156,21 +160,19 @@ class Executor:
                     "output": output,
                     "duration_ms": int(elapsed * 1000),
                 }
-                self._record(context.run_id, task.name, state, started_at)
-                return state
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
-                if attempts > task.retries:
-                    break
-                if task.retry_delay:
+                trace = traceback.format_exc(limit=2)
+                if attempts <= task.retries and task.retry_delay:
                     time.sleep(task.retry_delay)
-        state = {
-            "status": FAILED,
-            "attempts": attempts,
-            "error": error,
-            "trace": traceback.format_exc(limit=2),
-            "duration_ms": int((time.perf_counter() - clock) * 1000),
-        }
+        if state is None:
+            state = {
+                "status": FAILED,
+                "attempts": attempts,
+                "error": error,
+                "trace": trace,
+                "duration_ms": int((time.perf_counter() - clock) * 1000),
+            }
         self._record(context.run_id, task.name, state, started_at)
         return state
 

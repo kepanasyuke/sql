@@ -44,15 +44,15 @@ class Deduper:
     duplicates: int = 0
 
     def is_new(self, event_id: str) -> bool:
-        if event_id in self._seen:
+        fresh = event_id not in self._seen
+        if fresh:
+            self._seen.add(event_id)
+            self._order.append(event_id)
+            if len(self._order) > self.capacity:
+                self._seen.discard(self._order.popleft())
+        else:
             self.duplicates += 1
-            return False
-        self._seen.add(event_id)
-        self._order.append(event_id)
-        if len(self._order) > self.capacity:
-            oldest = self._order.popleft()
-            self._seen.discard(oldest)
-        return True
+        return fresh
 
 
 @dataclass
@@ -67,20 +67,19 @@ class WindowAggregator:
     late_dropped: int = 0
 
     def add(self, event: Event) -> list[dict]:
+        emitted: list[dict] = []
         if event.ts < self.watermark:
             self.late_dropped += 1
-            return []
-        self.max_ts = max(self.max_ts, event.ts)
-        start = self._window_start(event.ts)
-        bucket = self.windows.setdefault(start, {})
-        bucket[event.client_id] = round(bucket.get(event.client_id, 0.0) + event.amount, 2)
-        self.counts[start] = self.counts.get(start, 0) + 1
-
-        self.watermark = max(self.watermark, self.max_ts - self.allowed_lateness)
-        emitted = []
-        for window_start in sorted(self.windows):
-            if window_start + self.window_seconds <= self.watermark:
-                emitted.append(self._close(window_start))
+        else:
+            self.max_ts = max(self.max_ts, event.ts)
+            start = self._window_start(event.ts)
+            bucket = self.windows.setdefault(start, {})
+            bucket[event.client_id] = round(bucket.get(event.client_id, 0.0) + event.amount, 2)
+            self.counts[start] = self.counts.get(start, 0) + 1
+            self.watermark = max(self.watermark, self.max_ts - self.allowed_lateness)
+            for window_start in sorted(self.windows):
+                if window_start + self.window_seconds <= self.watermark:
+                    emitted.append(self._close(window_start))
         return emitted
 
     def flush(self) -> list[dict]:
@@ -120,9 +119,8 @@ class StreamPipeline:
     def process(self, events: Iterable[Event]) -> dict:
         for event in events:
             self.received += 1
-            if not self.deduper.is_new(event.event_id):
-                continue
-            self.aggregator.add(event)
+            if self.deduper.is_new(event.event_id):
+                self.aggregator.add(event)
         return {"windows": self.aggregator.closed, "metrics": self.metrics()}
 
     def finish(self) -> dict:
@@ -174,5 +172,8 @@ def generate_events(
                 amount=original.amount,
             )
         )
-    rng.shuffle(events)
-    return events
+    # Порядок прихода близок к порядку событий (как в реальном потоке): полный
+    # shuffle отправлял бы в late_dropped половину потока и делал демо бессмысленным.
+    jittered = [(event.ts + rng.uniform(-20, 20), event) for event in events]
+    jittered.sort(key=lambda item: item[0])
+    return [event for _, event in jittered]

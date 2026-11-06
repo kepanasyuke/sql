@@ -18,21 +18,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     if identical and not args.force:
         print(f"checksum-бакеты совпали ({len(left)} шт.): данные идентичны, детальная сверка не требуется")
         print(f"строк: источник {len(source)}, приёмник {len(target)}")
-        return 0
-
-    columns = [column.strip() for column in args.columns.split(",")] if args.columns else None
-    report = compare(source, target, key=args.key, columns=columns, sample_limit=args.samples)
-    report.buckets_compared = len(left)
-    report.buckets_matched = sum(1 for bucket, value in left.items() if right.get(bucket) == value)
-
-    if args.report:
-        Path(args.report).write_text(report.to_markdown(), encoding="utf-8")
-        print(f"отчёт: {args.report}")
-    if args.json:
-        print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+        code = 0
     else:
-        print(report.to_markdown())
-    return report.exit_code
+        columns = [column.strip() for column in args.columns.split(",")] if args.columns else None
+        report = compare(source, target, key=args.key, columns=columns, sample_limit=args.samples)
+        report.buckets_compared = len(left)
+        report.buckets_matched = sum(1 for bucket, value in left.items() if right.get(bucket) == value)
+
+        if args.report:
+            Path(args.report).write_text(report.to_markdown(), encoding="utf-8")
+            print(f"отчёт: {args.report}")
+        print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2) if args.json else report.to_markdown())
+        code = report.exit_code
+    return code
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -55,10 +53,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        return int(args.func(args))
+        code = int(args.func(args))
     except (OSError, KeyError) as exc:
         print(f"ошибка: {exc}", file=sys.stderr)
-        return 2
+        code = 2
+    return code
 
 
 if __name__ == "__main__":

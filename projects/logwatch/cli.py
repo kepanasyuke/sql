@@ -71,14 +71,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    code = 2
     if not args.demo and not args.file:
         print("ошибка: нужен --file или --demo", file=sys.stderr)
-        return 2
-    try:
-        return int(args.func(args))
-    except OSError as exc:
-        print(f"ошибка: {exc}", file=sys.stderr)
-        return 2
+    else:
+        try:
+            code = int(args.func(args))
+        except OSError as exc:
+            print(f"ошибка: {exc}", file=sys.stderr)
+    return code
 
 
 if __name__ == "__main__":

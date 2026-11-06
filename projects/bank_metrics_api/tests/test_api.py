@@ -29,11 +29,10 @@ def call(url: str, headers: dict | None = None) -> tuple[int, dict]:
     request = urllib.request.Request(url, headers=headers or {})
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
-            body = response.read()
-            return response.status, (json.loads(body) if body else {})
+            body, status = response.read(), response.status
     except urllib.error.HTTPError as error:
-        body = error.read()
-        return error.code, (json.loads(body) if body else {})
+        body, status = error.read(), error.code
+    return status, (json.loads(body) if body else {})
 
 
 def test_health(base_url: str) -> None:

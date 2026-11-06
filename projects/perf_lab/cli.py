@@ -58,10 +58,11 @@ def cmd_bench(args: argparse.Namespace) -> int:
         ))
 
     print(f"методика: {statistics_note()}")
+    code = 0
     if mismatched:
         print(f"ошибка: варианты расходятся в результате: {mismatched}", file=sys.stderr)
-        return 1
-    return 0
+        code = 1
+    return code
 
 
 def cmd_scenarios(args: argparse.Namespace) -> int:
@@ -93,10 +94,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        return int(args.func(args))
+        code = int(args.func(args))
     except (OSError, ValueError) as exc:
         print(f"ошибка: {exc}", file=sys.stderr)
-        return 2
+        code = 2
+    return code
 
 
 if __name__ == "__main__":

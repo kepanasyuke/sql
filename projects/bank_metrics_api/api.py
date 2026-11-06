@@ -84,11 +84,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             payload = self.route(path, query)
         except ApiError as exc:
             self._send_json(exc.status, {"error": exc.message})
-            return
         except sqlite3.Error as exc:
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"ошибка БД: {exc}"})
-            return
-        self._send_json(HTTPStatus.OK, payload)
+        else:
+            self._send_json(HTTPStatus.OK, payload)
 
     def do_POST(self) -> None:  # noqa: N802
         self._send_json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "только GET"})
@@ -96,15 +95,15 @@ class ApiHandler(BaseHTTPRequestHandler):
     def route(self, path: str, query: dict[str, list[str]]) -> dict:
         if path == "/health":
             self.db.execute("SELECT 1").fetchone()
-            return {"status": "ok", "database": "ok"}
-
-        if path == "/clients":
-            segment = query.get("segment", [None])[0]
-            limit = _parse_int(query, "limit", 10, MAX_LIMIT)
-            offset = _parse_int(query, "offset", 0, 10_000)
-            return store.list_clients(self.db, segment, limit, offset)
-
-        if path.startswith("/clients/") and path.endswith("/turnover"):
+            payload = {"status": "ok", "database": "ok"}
+        elif path == "/clients":
+            payload = store.list_clients(
+                self.db,
+                query.get("segment", [None])[0],
+                _parse_int(query, "limit", 10, MAX_LIMIT),
+                _parse_int(query, "offset", 0, 10_000),
+            )
+        elif path.startswith("/clients/") and path.endswith("/turnover"):
             client_id = path[len("/clients/"): -len("/turnover")]
             if store.get_client(self.db, client_id) is None:
                 raise ApiError(HTTPStatus.NOT_FOUND, f"клиент {client_id} не найден")
@@ -112,15 +111,14 @@ class ApiHandler(BaseHTTPRequestHandler):
             date_to = _parse_date(query.get("to", ["2026-11-06"])[0], "to")
             if date_from > date_to:
                 raise ApiError(HTTPStatus.BAD_REQUEST, "from не может быть позже to")
-            return store.turnover_for_client(self.db, client_id, date_from, date_to)
-
-        if path == "/portfolio":
-            return store.portfolio_summary(self.db, _parse_float(query, "min_debt", 0.0))
-
-        if path == "/dq":
-            return store.dq_status(self.db)
-
-        raise ApiError(HTTPStatus.NOT_FOUND, f"маршрут {path} не найден")
+            payload = store.turnover_for_client(self.db, client_id, date_from, date_to)
+        elif path == "/portfolio":
+            payload = store.portfolio_summary(self.db, _parse_float(query, "min_debt", 0.0))
+        elif path == "/dq":
+            payload = store.dq_status(self.db)
+        else:
+            raise ApiError(HTTPStatus.NOT_FOUND, f"маршрут {path} не найден")
+        return payload
 
     # -- ответ -------------------------------------------------------------
     def _send_json(self, status: HTTPStatus, payload: dict) -> None:

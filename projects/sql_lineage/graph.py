@@ -29,6 +29,8 @@ class LineageModel:
     table_edges: set[tuple[str, str]] = field(default_factory=set)
     column_edges: list[ColumnEdge] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    _down: dict[str, set[str]] | None = field(default=None, repr=False)
+    _up: dict[str, set[str]] | None = field(default=None, repr=False)
 
     # -- построение --------------------------------------------------------
     def add_statement(self, statement: Statement) -> None:
@@ -39,33 +41,50 @@ class LineageModel:
                 self.table_edges.add((source, target))
         for output in statement.query.outputs:
             traced = _trace_column(statement.query, output.source_alias, output.source_column)
-            if not traced:
-                if output.source_column:
-                    self.warnings.append(
-                        f"{target}.{output.name}: не удалось проследить {output.expression or output.source_column}"
-                    )
-                continue
-            for base_table, base_column in traced:
-                edge = ColumnEdge(base_table, base_column, target, output.name)
-                if edge not in self.column_edges:
-                    self.column_edges.append(edge)
+            if traced:
+                for base_table, base_column in traced:
+                    edge = ColumnEdge(base_table, base_column, target, output.name)
+                    if edge not in self.column_edges:
+                        self.column_edges.append(edge)
+            elif output.source_column:
+                self.warnings.append(
+                    f"{target}.{output.name}: не удалось проследить {output.expression or output.source_column}"
+                )
+        self._down = None
+        self._up = None
+
+    # -- индексы -----------------------------------------------------------
+    def _downstream_map(self) -> dict[str, set[str]]:
+        if self._down is None:
+            index: dict[str, set[str]] = {}
+            for source, target in self.table_edges:
+                index.setdefault(source.lower(), set()).add(target)
+            self._down = index
+        return self._down
+
+    def _upstream_map(self) -> dict[str, set[str]]:
+        if self._up is None:
+            index: dict[str, set[str]] = {}
+            for source, target in self.table_edges:
+                index.setdefault(target.lower(), set()).add(source)
+            self._up = index
+        return self._up
 
     # -- навигация ---------------------------------------------------------
     def upstream(self, table: str) -> list[str]:
-        return sorted({source for source, target in self.table_edges if _same(target, table)})
+        return sorted(self._upstream_map().get(table.lower(), ()))
 
     def downstream(self, table: str) -> list[str]:
-        return sorted({target for source, target in self.table_edges if _same(source, table)})
+        return sorted(self._downstream_map().get(table.lower(), ()))
 
     def all_downstream(self, table: str) -> list[str]:
         seen: set[str] = set()
         queue = deque(self.downstream(table))
         while queue:
             node = queue.popleft()
-            if node in seen:
-                continue
-            seen.add(node)
-            queue.extend(self.downstream(node))
+            if node not in seen:
+                seen.add(node)
+                queue.extend(self.downstream(node))
         return sorted(seen)
 
     def all_upstream(self, table: str) -> list[str]:
@@ -73,10 +92,9 @@ class LineageModel:
         queue = deque(self.upstream(table))
         while queue:
             node = queue.popleft()
-            if node in seen:
-                continue
-            seen.add(node)
-            queue.extend(self.upstream(node))
+            if node not in seen:
+                seen.add(node)
+                queue.extend(self.upstream(node))
         return sorted(seen)
 
     def column_upstream(self, table: str, column: str) -> list[str]:
@@ -86,15 +104,15 @@ class LineageModel:
         while stack:
             source_table, source_column = stack.pop()
             node = f"{source_table}.{source_column}"
-            if node in seen:
-                continue
-            seen.append(node)
-            stack.extend(
-                (edge.source_table, edge.source_column)
-                for edge in self.column_edges
-                if _same(edge.target_table, source_table) and edge.target_column == source_column
-            )
+            if node not in seen:
+                seen.append(node)
+                stack.extend(
+                    (edge.source_table, edge.source_column)
+                    for edge in self.column_edges
+                    if _same(edge.target_table, source_table) and edge.target_column == source_column
+                )
         return sorted(seen)
+
 
     def impact(self, table: str) -> dict:
         direct = self.downstream(table)
@@ -197,30 +215,42 @@ def _trace_column(
     """
     root = root or query
     ctes = query.ctes or root.ctes
-    if not column or depth > 8:
-        return []
-    aliases = _query_aliases(query)
-    source: SourceRef | None = None
-    if alias:
-        source = aliases.get(alias.lower())
-    elif len({s.name.lower() for s in query.sources}) == 1:
-        source = next(iter(query.sources))
+    traced: list[tuple[str, str]] = []
+    if column and depth <= 8:
+        aliases = _query_aliases(query)
+        source: SourceRef | None = None
+        if alias:
+            source = aliases.get(alias.lower())
+        elif len({s.name.lower() for s in query.sources}) == 1:
+            source = next(iter(query.sources))
 
-    if source is None:
-        for cte in ctes.values():
-            output = next((item for item in cte.outputs if item.name == column), None)
-            if output is not None:
-                return _trace_column(cte, output.source_alias, output.source_column, depth + 1, root)
-        return []
-
-    key = source.table.lower()
-    if key in ctes:
-        cte = ctes[key]
-        output = next((item for item in cte.outputs if item.name == column), None)
-        if output is None or (output.source_alias is None and output.source_column is None):
-            return []
-        return _trace_column(cte, output.source_alias, output.source_column, depth + 1, root)
-    return [(source.name, column)]
+        if source is None:
+            matches = (
+                (cte, output)
+                for cte in ctes.values()
+                for output in cte.outputs
+                if output.name == column
+            )
+            cte, output = next(matches, (None, None))
+            traced = (
+                _trace_column(cte, output.source_alias, output.source_column, depth + 1, root)
+                if cte is not None
+                else []
+            )
+        else:
+            key = source.table.lower()
+            if key in ctes:
+                cte = ctes[key]
+                output = next((item for item in cte.outputs if item.name == column), None)
+                traced = (
+                    _trace_column(cte, output.source_alias, output.source_column, depth + 1, root)
+                    if output is not None
+                    and not (output.source_alias is None and output.source_column is None)
+                    else []
+                )
+            else:
+                traced = [(source.name, column)]
+    return traced
 
 
 def build_model(statements: Iterable[Statement]) -> LineageModel:

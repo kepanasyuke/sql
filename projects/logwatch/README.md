@@ -28,10 +28,11 @@ python -m projects.logwatch.cli analyze --file nginx.log --json
 
 ```
 строк разобрано: 42
-алертов: 4, подавлено повторов: 7
+алертов: 6, подавлено повторов: 3
+  [P2] app.error: GET /api/clients/17 503 x1 — ошибки в логе приложения
+  [P2] app.error: POST /api/transfer 500 x1 — ошибки в логе приложения
   [P1] db.pool_exhausted: POST /api/transfer 500 x1 — проблемы с пулом соединений БД
-  [P1] http.5xx_burst: GET /api/clients/7 503 x3 — серия ответов 5xx
-  [P2] app.error: POST /api/transfer 500 x2 — ошибки в логе приложения
+  [P3] http.slow_request: POST /api/transfer 500 x1 — медленный запрос
 ```
 
 ## Почему дедупликация — ключевая часть

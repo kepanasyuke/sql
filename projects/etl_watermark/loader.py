@@ -47,14 +47,14 @@ def _now() -> str:
 
 
 def _sql_type(values: Iterable[Any]) -> str:
-    for value in values:
-        if isinstance(value, bool):
-            return "INTEGER"
-        if isinstance(value, (int, float)):
-            return "REAL"
-        if value is not None:
-            return "TEXT"
-    return "TEXT"
+    first = next((value for value in values if value is not None), None)
+    if isinstance(first, bool):
+        detected = "INTEGER"
+    elif isinstance(first, (int, float)):
+        detected = "REAL"
+    else:
+        detected = "TEXT"
+    return detected
 
 
 @dataclass
@@ -113,22 +113,18 @@ class Loader:
         self._conn.commit()
 
     def ensure_table(self, rows: Sequence[Mapping]) -> None:
-        if self._conn.execute(
+        exists = self._conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (self.table,)
-        ).fetchone():
-            return
-        if not rows:
-            return
-        present = list(rows[0].keys())
-        columns = list(self.columns) or present
-        definitions = [f"{self.key} TEXT NOT NULL", f"{self.watermark} TEXT NOT NULL"]
-        for name in columns:
-            if name in (self.key, self.watermark):
-                continue
-            definitions.append(f"{name} {_sql_type(row.get(name) for row in rows[:50])}")
-        definitions.append(f"PRIMARY KEY ({self.key}, {self.watermark})")
-        self._conn.execute(f"CREATE TABLE {self.table} ({', '.join(definitions)})")
-        self._conn.commit()
+        ).fetchone()
+        if not exists and rows:
+            columns = list(self.columns) or list(rows[0].keys())
+            definitions = [f"{self.key} TEXT NOT NULL", f"{self.watermark} TEXT NOT NULL"]
+            for name in columns:
+                if name not in (self.key, self.watermark):
+                    definitions.append(f"{name} {_sql_type(row.get(name) for row in rows[:50])}")
+            definitions.append(f"PRIMARY KEY ({self.key}, {self.watermark})")
+            self._conn.execute(f"CREATE TABLE {self.table} ({', '.join(definitions)})")
+            self._conn.commit()
 
     def current_watermark(self) -> str | None:
         row = self._conn.execute(
@@ -155,16 +151,17 @@ class Loader:
         attempts = 0
         last_error: str | None = None
         rows: list[dict] = []
-        while attempts < max(self.retries, 1):
+        max_attempts = max(self.retries, 1)
+        loaded = False
+        while attempts < max_attempts and not loaded:
             attempts += 1
             try:
                 rows = [dict(row) for row in source()]
-                break
+                loaded = True
             except Exception as exc:  # источник может падать транзиентно
                 last_error = f"{type(exc).__name__}: {exc}"
-                if attempts >= max(self.retries, 1):
-                    break
-                time.sleep(self.backoff * attempts)
+                if attempts < max_attempts:
+                    time.sleep(self.backoff * attempts)
 
         if len(rows) == 0 and last_error:
             self._finish(run_id, FAILED, attempts, 0, 0, 0, watermark_before, last_error)

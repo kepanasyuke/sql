@@ -13,6 +13,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import re
+import zlib
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -30,20 +31,19 @@ SPACES_RE = re.compile(r"[ \u00a0]")
 def canonical(value) -> str:
     """Канонический вид значения: '1 234,50' и '1234.5' — одно и то же число."""
     if value is None:
-        return ""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float, Decimal)):
-        return _decimal_text(Decimal(str(value)))
-    text = str(value).strip()
-    if text == "":
-        return ""
-    if NUMERIC_RE.match(text):
-        cleaned = SPACES_RE.sub("", text).replace(",", ".")
-        try:
-            return _decimal_text(Decimal(cleaned))
-        except InvalidOperation:
-            return text
+        text = ""
+    elif isinstance(value, bool):
+        text = "true" if value else "false"
+    elif isinstance(value, (int, float, Decimal)):
+        text = _decimal_text(Decimal(str(value)))
+    else:
+        text = str(value).strip()
+        if text and NUMERIC_RE.match(text):
+            cleaned = SPACES_RE.sub("", text).replace(",", ".")
+            try:
+                text = _decimal_text(Decimal(cleaned))
+            except InvalidOperation:
+                text = str(value).strip()
     return text
 
 
@@ -62,16 +62,18 @@ def sort_rows(rows: Iterable[Mapping], key: str) -> list[dict]:
 
 
 def bucket_checksums(rows: Iterable[Mapping], key: str, buckets: int = 8) -> dict[int, tuple[int, int]]:
-    """Номер бакета → (количество строк, сумма хешей). Сумма не зависит от порядка."""
+    """Номер бакета → (количество строк, сумма хешей). Сумма не зависит от порядка.
+
+    Бакет считается по crc32 ключа (быстро и детерминированно между процессами),
+    контрольная сумма строки — по одному sha256 на строку.
+    """
     result: dict[int, tuple[int, int]] = {index: (0, 0) for index in range(buckets)}
     for row in rows:
-        fingerprint = canonical(row.get(key))
-        bucket = int(hashlib.sha256(fingerprint.encode()).hexdigest()[:8], 16) % buckets
-        total = hashlib.sha256(
-            "|".join(f"{name}={canonical(row[name])}" for name in sorted(row)).encode()
-        )
-        count, checksum = result.get(bucket, (0, 0))
-        result[bucket] = (count + 1, (checksum + int(total.hexdigest()[:16], 16)) % (2**64))
+        bucket = zlib.crc32(canonical(row.get(key)).encode()) % buckets
+        payload = "|".join(f"{name}={canonical(row[name])}" for name in sorted(row)).encode()
+        checksum = int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+        count, total = result[bucket]
+        result[bucket] = (count + 1, (total + checksum) % (2**64))
     return result
 
 
@@ -130,16 +132,15 @@ class ReconReport:
         ]
         for status in (MISSING, EXTRA, CHANGED):
             rows = self.samples.get(status) or []
-            if not rows:
-                continue
-            keys = list(rows[0].keys())
-            lines.append(f"## {status}")
-            lines.append("")
-            lines.append("| " + " | ".join(keys) + " |")
-            lines.append("| " + " | ".join("---" for _ in keys) + " |")
-            for row in rows:
-                lines.append("| " + " | ".join(str(row.get(k, "")) for k in keys) + " |")
-            lines.append("")
+            if rows:
+                keys = list(rows[0].keys())
+                lines.append(f"## {status}")
+                lines.append("")
+                lines.append("| " + " | ".join(keys) + " |")
+                lines.append("| " + " | ".join("---" for _ in keys) + " |")
+                for row in rows:
+                    lines.append("| " + " | ".join(str(row.get(k, "")) for k in keys) + " |")
+                lines.append("")
         return "\n".join(lines)
 
 
@@ -197,18 +198,18 @@ def compare(
             report.counts[status] = report.counts.get(status, 0) + 1
             if len(report.samples[status]) < sample_limit:
                 report.samples[status].append(_cut(source_row, key, compared))
-            continue
-        diff = {
-            column: {"source": source_row.get(column), "target": (target_row or {}).get(column)}
-            for column in compared
-            if canonical(source_row.get(column)) != canonical((target_row or {}).get(column))
-        }
-        if diff:
-            report.counts[CHANGED] = report.counts.get(CHANGED, 0) + 1
-            if len(report.samples[CHANGED]) < sample_limit:
-                report.samples[CHANGED].append({key: source_row.get(key), **diff})
         else:
-            report.counts[MATCHED] = report.counts.get(MATCHED, 0) + 1
+            diff = {
+                column: {"source": source_row.get(column), "target": (target_row or {}).get(column)}
+                for column in compared
+                if canonical(source_row.get(column)) != canonical((target_row or {}).get(column))
+            }
+            if diff:
+                report.counts[CHANGED] = report.counts.get(CHANGED, 0) + 1
+                if len(report.samples[CHANGED]) < sample_limit:
+                    report.samples[CHANGED].append({key: source_row.get(key), **diff})
+            else:
+                report.counts[MATCHED] = report.counts.get(MATCHED, 0) + 1
     return report
 
 

@@ -56,10 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        return int(args.func(args))
+        code = int(args.func(args))
     except (OSError, ValueError) as exc:
         print(f"ошибка: {exc}", file=sys.stderr)
-        return 2
+        code = 2
+    return code
 
 
 if __name__ == "__main__":

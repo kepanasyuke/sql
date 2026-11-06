@@ -27,8 +27,10 @@ def cmd_status(args: argparse.Namespace) -> int:
     drift = [row for row in rows if row["state"] == "DRIFT"]
     if drift:
         print(f"ВНИМАНИЕ: дрейф в {len(drift)} миграциях", file=sys.stderr)
-        return 1
-    return 0
+        code = 1
+    else:
+        code = 0
+    return code
 
 
 def cmd_apply(args: argparse.Namespace) -> int:
@@ -110,10 +112,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        return int(args.func(args))
+        code = int(args.func(args))
     except (MigrationError, OSError) as exc:
         print(f"ошибка: {exc}", file=sys.stderr)
-        return 2
+        code = 2
+    return code
 
 
 if __name__ == "__main__":

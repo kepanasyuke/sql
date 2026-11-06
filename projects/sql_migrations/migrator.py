@@ -68,8 +68,8 @@ def parse_migration(path: Path) -> Migration:
         marker = SECTION_RE.match(line)
         if marker:
             current = marker.group(1).lower()
-            continue
-        sections[current].append(line)
+        else:
+            sections[current].append(line)
     return Migration(
         version=int(match.group(1)),
         name=match.group(2),
@@ -113,18 +113,16 @@ def split_statements(sql: str) -> list[str]:
             buffer.append(char)
             if char == quote:
                 quote = None
-            continue
-        if char in ("'", '"'):
+        elif char in ("'", '"'):
             quote = char
             buffer.append(char)
-            continue
-        if char == ";":
+        elif char == ";":
             statement = "".join(buffer).strip()
             if statement:
                 statements.append(statement)
             buffer = []
-            continue
-        buffer.append(char)
+        else:
+            buffer.append(char)
     tail = "".join(buffer).strip()
     if tail:
         statements.append(tail)
@@ -202,9 +200,11 @@ class Migrator:
         self.lock()
         applied: list[dict] = []
         try:
-            for migration in self.pending():
-                if target_version is not None and migration.version > target_version:
-                    break
+            for migration in (
+                item
+                for item in self.pending()
+                if target_version is None or item.version <= target_version
+            ):
                 started = time.perf_counter()
                 self._run_in_transaction(
                     migration.up,
@@ -217,27 +217,28 @@ class Migrator:
 
     def rollback(self, version: int | None = None) -> list[dict]:
         applied = self.applied()
-        if not applied:
-            return []
-        target = version if version is not None else max(applied)
-        migrations = {item.version: item for item in discover(self.directory)}
-        if target not in applied:
-            raise MigrationError(f"миграция {target} не применена")
-        migration = migrations.get(target)
-        if migration is None:
-            raise MigrationError(f"файл миграции {target} не найден в каталоге")
-        if not migration.down.strip():
-            raise MigrationError(f"у миграции {migration.key} нет секции down")
+        rolled: list[dict] = []
+        if applied:
+            target = version if version is not None else max(applied)
+            migrations = {item.version: item for item in discover(self.directory)}
+            if target not in applied:
+                raise MigrationError(f"миграция {target} не применена")
+            migration = migrations.get(target)
+            if migration is None:
+                raise MigrationError(f"файл миграции {target} не найден в каталоге")
+            if not migration.down.strip():
+                raise MigrationError(f"у миграции {migration.key} нет секции down")
 
-        self.lock()
-        try:
-            self._run_in_transaction(
-                migration.down,
-                ledger_insert=f"DELETE FROM schema_migrations WHERE version = {migration.version};",
-            )
-        finally:
-            self.unlock()
-        return [{"version": migration.version, "name": migration.name, "direction": "down"}]
+            self.lock()
+            try:
+                self._run_in_transaction(
+                    migration.down,
+                    ledger_insert=f"DELETE FROM schema_migrations WHERE version = {migration.version};",
+                )
+            finally:
+                self.unlock()
+            rolled.append({"version": migration.version, "name": migration.name, "direction": "down"})
+        return rolled
 
     def _insert_sql(self, migration: Migration, duration_ms: int) -> str:
         return (

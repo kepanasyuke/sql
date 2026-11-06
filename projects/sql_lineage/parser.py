@@ -95,9 +95,8 @@ def tokenize(sql: str) -> list[Token]:
             raise SqlParseError(f"неожиданный символ {sql[pos]!r} в позиции {pos}")
         pos = match.end()
         kind = match.lastgroup or ""
-        if kind in ("ws", "comment"):
-            continue
-        tokens.append(Token(kind, match.group()))
+        if kind not in ("ws", "comment"):
+            tokens.append(Token(kind, match.group()))
     return tokens
 
 
@@ -118,14 +117,14 @@ def _split_top_level(tokens: list[Token]) -> list[list[Token]]:
     parts: list[list[Token]] = [[]]
     depth = 0
     for token in tokens:
+        if token.value == "," and depth == 0:
+            parts.append([])
+        else:
+            parts[-1].append(token)
         if token.value == "(":
             depth += 1
         elif token.value == ")":
             depth -= 1
-        if token.value == "," and depth == 0:
-            parts.append([])
-            continue
-        parts[-1].append(token)
     return [part for part in parts if part]
 
 
@@ -147,6 +146,7 @@ def _parse_sources(body: list[Token]) -> list[SourceRef]:
     index = 0
     while index < len(body):
         token = body[index]
+        step = index + 1
         if token.value == "(":
             depth += 1
         elif token.value == ")":
@@ -155,44 +155,43 @@ def _parse_sources(body: list[Token]) -> list[SourceRef]:
             try:
                 name, cursor = _read_identifier(body, index + 1)
             except SqlParseError:
-                index += 1
-                continue
-            alias = name.split(".")[-1]
-            if cursor < len(body) and body[cursor].kind == "word" and body[cursor].low == "as":
-                cursor += 1
-            if (
-                cursor < len(body)
-                and body[cursor].kind == "word"
-                and body[cursor].low not in KEYWORDS
-            ):
-                alias = body[cursor].value
-                cursor += 1
-            sources.append(SourceRef(name=name, alias=alias))
-            index = cursor
-            continue
-        index += 1
+                step = index + 1
+            else:
+                alias = name.split(".")[-1]
+                if cursor < len(body) and body[cursor].kind == "word" and body[cursor].low == "as":
+                    cursor += 1
+                if (
+                    cursor < len(body)
+                    and body[cursor].kind == "word"
+                    and body[cursor].low not in KEYWORDS
+                ):
+                    alias = body[cursor].value
+                    cursor += 1
+                sources.append(SourceRef(name=name, alias=alias))
+                step = cursor
+        index = step
     return sources
 
 
-def _parse_select_list(tokens: list[Token]) -> list[OutputColumn]:
-    outputs: list[OutputColumn] = []
-    for item in _split_top_level(tokens):
-        if not item:
-            continue
-        if item[0].low == "distinct":
-            item = item[1:]
-        if not item:
-            continue
-        if len(item) == 1 and item[0].value == "*":
-            continue
-
+def _parse_select_item(item: list[Token]) -> OutputColumn | None:
+    """Один элемент SELECT-списка: колонка или None, если разбирать нечего."""
+    column: OutputColumn | None = None
+    if item and item[0].low == "distinct":
+        item = item[1:]
+    if item and not (len(item) == 1 and item[0].value == "*"):
         alias: str | None = None
         expression = item
-        for position, token in enumerate(item):
-            if token.kind == "word" and token.low == "as" and position + 1 < len(item):
-                alias = item[position + 1].value
-                expression = item[:position]
-                break
+        explicit = next(
+            (
+                (position, item[position + 1].value)
+                for position, token in enumerate(item)
+                if token.kind == "word" and token.low == "as" and position + 1 < len(item)
+            ),
+            None,
+        )
+        if explicit is not None:
+            alias = explicit[1]
+            expression = item[: explicit[0]]
         if alias is None and len(item) >= 2 and item[-1].kind == "word" and item[-2].kind == "word":
             # SELECT sum(x) total  -- неявный алиас
             if item[-2].value != ".":
@@ -201,107 +200,111 @@ def _parse_select_list(tokens: list[Token]) -> list[OutputColumn]:
 
         source_alias: str | None = None
         source_column: str | None = None
-        for position, token in enumerate(expression):
-            if (
-                token.kind == "word"
-                and token.low not in KEYWORDS
-                and position + 2 < len(expression)
-                and expression[position + 1].value == "."
-                and expression[position + 2].kind == "word"
-            ):
-                source_alias = token.value
-                source_column = expression[position + 2].value
-                break
+        qualified = next(
+            (
+                (token.value, expression[position + 2].value)
+                for position, token in enumerate(expression)
+                if (
+                    token.kind == "word"
+                    and token.low not in KEYWORDS
+                    and position + 2 < len(expression)
+                    and expression[position + 1].value == "."
+                    and expression[position + 2].kind == "word"
+                )
+            ),
+            None,
+        )
+        if qualified is not None:
+            source_alias, source_column = qualified
         if source_column is None:
             words = [t for t in expression if t.kind == "word" and t.low not in KEYWORDS]
             if len(words) == 1 and (len(expression) == 1 or expression[0].value != "("):
                 source_column = words[0].value
-        if alias is None:
-            alias = source_column or "expr"
 
-        outputs.append(
-            OutputColumn(
-                name=alias,
-                source_alias=source_alias,
-                source_column=source_column,
-                expression=" ".join(token.value for token in expression)[:120],
-            )
+        column = OutputColumn(
+            name=alias or source_column or "expr",
+            source_alias=source_alias,
+            source_column=source_column,
+            expression=" ".join(token.value for token in expression)[:120],
         )
-    return outputs
+    return column
+
+
+def _parse_select_list(tokens: list[Token]) -> list[OutputColumn]:
+    columns = (_parse_select_item(item) for item in _split_top_level(tokens))
+    return [column for column in columns if column is not None]
 
 
 def parse_query(tokens: list[Token]) -> Query:
+    """Разбирает запрос: CTE, источники, SELECT-список. Один выход — один Query."""
     query = Query()
-    depth = 0
-    start = None
-    for position, token in enumerate(tokens):
-        if token.value == "(":
-            depth += 1
-        elif token.value == ")":
-            depth -= 1
-        elif depth == 0 and token.kind == "word" and token.low in ("with", "select"):
-            start = position
-            break
-    if start is None:
-        return query
-    tokens = tokens[start:]
+    start = _query_start(tokens)
+    if start is not None:
+        tokens = tokens[start:]
+        index = 0
+        if tokens[0].low == "with":
+            index = _parse_ctes(tokens, query)
 
-    index = 0
-    if tokens[0].low == "with":
-        index = 1
-        while index < len(tokens):
-            cte_name = tokens[index].value
-            index += 1
-            if index < len(tokens) and tokens[index].value == "(":
-                index = _find_matching(tokens, index) + 1
-            if index >= len(tokens) or tokens[index].low != "as":
-                raise SqlParseError(f"ожидалось AS после имени CTE {cte_name}")
-            index += 1
-            if index >= len(tokens) or tokens[index].value != "(":
-                raise SqlParseError(f"ожидалось '(' в определении CTE {cte_name}")
-            end = _find_matching(tokens, index)
-            query.ctes[cte_name.lower()] = parse_query(tokens[index + 1 : end])
-            index = end + 1
-            if index < len(tokens) and tokens[index].value == ",":
-                index += 1
-                continue
-            break
-
-    body = tokens[index:]
-    select_at = None
-    depth = 0
-    for position, token in enumerate(body):
-        if token.value == "(":
-            depth += 1
-        elif token.value == ")":
-            depth -= 1
-        elif depth == 0 and token.kind == "word" and token.low == "select":
-            select_at = position
-            break
-    if select_at is None:
-        return query
-    from_at = None
-    for position in range(select_at + 1, len(body)):
-        token = body[position]
-        if token.value == "(":
-            depth += 1
-        elif token.value == ")":
-            depth -= 1
-        elif depth == 0 and token.kind == "word" and token.low in ("from", "where", "group"):
-            from_at = position
-            break
-    select_tokens = body[select_at + 1 : from_at if from_at is not None else len(body)]
-    query.outputs = _parse_select_list(select_tokens)
-    if from_at is not None:
-        query.sources = _parse_sources(body[from_at:])
+        body = tokens[index:]
+        select_at = _first_at_depth_zero(body, ("select",))
+        if select_at is not None:
+            from_at = _first_at_depth_zero(body, ("from", "where", "group"), select_at + 1)
+            select_tokens = body[select_at + 1 : from_at if from_at is not None else len(body)]
+            query.outputs = _parse_select_list(select_tokens)
+            if from_at is not None:
+                query.sources = _parse_sources(body[from_at:])
     return query
 
 
+def _query_start(tokens: list[Token]) -> int | None:
+    return _first_at_depth_zero(tokens, ("with", "select"))
+
+
+def _first_at_depth_zero(tokens: list[Token], words: tuple[str, ...], start: int = 0) -> int | None:
+    found: int | None = None
+    depth = 0
+    position = start
+    while position < len(tokens) and found is None:
+        token = tokens[position]
+        if token.value == "(":
+            depth += 1
+        elif token.value == ")":
+            depth -= 1
+        elif depth == 0 and token.kind == "word" and token.low in words:
+            found = position
+        position += 1
+    return found
+
+
+def _parse_ctes(tokens: list[Token], query: Query) -> int:
+    """Читает все CTE и возвращает позицию начала основного SELECT."""
+    index = 1
+    more = index < len(tokens)
+    while more:
+        cte_name = tokens[index].value
+        index += 1
+        if index < len(tokens) and tokens[index].value == "(":
+            index = _find_matching(tokens, index) + 1
+        if index >= len(tokens) or tokens[index].low != "as":
+            raise SqlParseError(f"ожидалось AS после имени CTE {cte_name}")
+        index += 1
+        if index >= len(tokens) or tokens[index].value != "(":
+            raise SqlParseError(f"ожидалось '(' в определении CTE {cte_name}")
+        end = _find_matching(tokens, index)
+        query.ctes[cte_name.lower()] = parse_query(tokens[index + 1 : end])
+        index = end + 1
+        more = index < len(tokens) and tokens[index].value == ","
+        if more:
+            index += 1
+    return index
+
+
 def _statement_name(tokens: list[Token], index: int) -> tuple[str, str, int]:
-    """Определяет тип и имя целевой сущности: CREATE TABLE/VIEW ... AS, INSERT INTO ...."""
-    if tokens[index].low == "create":
-        cursor = index + 1
-        kind = "table"
+    """Тип и имя целевой сущности: CREATE TABLE/VIEW ... AS, INSERT INTO ...."""
+    name, kind, cursor = "", "query", index
+    head = tokens[index].low
+    if head == "create":
+        kind, cursor = "table", index + 1
         if cursor < len(tokens) and tokens[cursor].low in ("table", "view"):
             kind = tokens[cursor].low
             cursor += 1
@@ -310,14 +313,12 @@ def _statement_name(tokens: list[Token], index: int) -> tuple[str, str, int]:
                 cursor += 1
             cursor += 1
         name, cursor = _read_identifier(tokens, cursor)
-        return name, kind, cursor
-    if tokens[index].low == "insert":
-        cursor = index + 1
+    elif head == "insert":
+        kind, cursor = "insert", index + 1
         if cursor < len(tokens) and tokens[cursor].low == "into":
             cursor += 1
         name, cursor = _read_identifier(tokens, cursor)
-        return name, "insert", cursor
-    return "", "query", index
+    return name, kind, cursor
 
 
 def parse_script(sql: str) -> list[Statement]:
@@ -332,26 +333,28 @@ def parse_script(sql: str) -> list[Statement]:
         stripped = raw_line.strip()
         if stripped.lower().startswith("-- name:") and depth == 0:
             pending_name = stripped.split(":", 1)[1].strip()
-            continue
-        for char in raw_line:
-            if char == "(":
-                depth += 1
-            elif char == ")":
-                depth -= 1
-        current.append(raw_line)
-        if depth == 0 and raw_line.rstrip().endswith(";"):
-            chunks.append(("\n".join(current), pending_name))
-            current, pending_name = [], ""
+        else:
+            for char in raw_line:
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+            current.append(raw_line)
+            if depth == 0 and raw_line.rstrip().endswith(";"):
+                chunks.append(("\n".join(current), pending_name))
+                current, pending_name = [], ""
     if "".join(current).strip():
         chunks.append(("\n".join(current), pending_name))
 
     for chunk, name in chunks:
         tokens = tokenize(chunk)
-        if not tokens:
-            continue
-        target, kind, _ = _statement_name(tokens, 0)
-        query = parse_query(tokens)
-        statements.append(
-            Statement(name=target or name or f"query_{len(statements) + 1}", query=query, kind=kind)
-        )
+        if tokens:
+            target, kind, _ = _statement_name(tokens, 0)
+            statements.append(
+                Statement(
+                    name=target or name or f"query_{len(statements) + 1}",
+                    query=parse_query(tokens),
+                    kind=kind,
+                )
+            )
     return statements

@@ -109,13 +109,14 @@ def _hash_rows(rows: list[tuple]) -> str:
 
 
 def _percentile(values: list[float], q: float) -> float:
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    position = (len(ordered) - 1) * q
-    low = int(position)
-    high = min(low + 1, len(ordered) - 1)
-    return round(ordered[low] + (ordered[high] - ordered[low]) * (position - low), 3)
+    result = 0.0
+    if values:
+        ordered = sorted(values)
+        position = (len(ordered) - 1) * q
+        low = int(position)
+        high = min(low + 1, len(ordered) - 1)
+        result = round(ordered[low] + (ordered[high] - ordered[low]) * (position - low), 3)
+    return result
 
 
 def measure(connection: sqlite3.Connection, variant: Variant, repeats: int = 5) -> tuple[list[tuple], list[float]]:

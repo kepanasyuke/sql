@@ -36,27 +36,32 @@ class LogRecord:
         return levels.get(self.level.lower(), 1)
 
 
+TS_FORMATS = ("%d/%b/%Y:%H:%M:%S %z", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S")
+
+
 def parse_ts(value: str) -> datetime | None:
-    formats = ("%d/%b/%Y:%H:%M:%S %z", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S")
-    for fmt in formats:
+    """Первый формат, который разобрался; None, если ни один не подошёл."""
+    text = value.replace("Z", "+0000") if value.endswith("Z") else value
+    parsed = None
+    index = 0
+    while index < len(TS_FORMATS) and parsed is None:
         try:
-            parsed = datetime.strptime(value.replace("Z", "+0000") if value.endswith("Z") else value, fmt)
-            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+            candidate = datetime.strptime(text, TS_FORMATS[index])
         except ValueError:
-            continue
-    return None
+            candidate = None
+        if candidate is not None:
+            parsed = candidate if candidate.tzinfo else candidate.replace(tzinfo=timezone.utc)
+        index += 1
+    return parsed
 
 
-def parse_line(line: str) -> LogRecord | None:
-    text = line.strip()
-    if not text:
-        return None
-
-    if text.startswith("{"):
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
-            return None
+def _parse_json_line(text: str) -> LogRecord | None:
+    record = None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        payload = None
+    if payload is not None:
         record = LogRecord(raw=text, fields=payload)
         record.ts = parse_ts(str(payload.get("ts") or payload.get("time") or ""))
         record.level = str(payload.get("level", "info")).lower()
@@ -66,17 +71,27 @@ def parse_line(line: str) -> LogRecord | None:
         record.status = int(status) if status is not None else None
         duration = payload.get("duration_ms") or payload.get("latency_ms")
         record.duration_ms = float(duration) if duration is not None else None
-        return record
+    return record
 
+
+def _parse_nginx_line(text: str) -> LogRecord | None:
     match = NGINX_RE.match(text)
-    if not match:
-        return None
-    record = LogRecord(raw=text)
-    record.ts = parse_ts(match.group("ts"))
-    record.method = match.group("method")
-    record.path = match.group("path").split("?")[0]
-    record.status = int(match.group("status"))
-    record.level = "error" if record.status and record.status >= 500 else "info"
+    record = LogRecord(raw=text) if match else None
+    if match and record is not None:
+        record.ts = parse_ts(match.group("ts"))
+        record.method = match.group("method")
+        record.path = match.group("path").split("?")[0]
+        record.status = int(match.group("status"))
+        record.level = "error" if record.status and record.status >= 500 else "info"
+    return record
+
+
+def parse_line(line: str) -> LogRecord | None:
+    """Строка лога → запись. Формат определяется по первому символу."""
+    text = line.strip()
+    record = None
+    if text:
+        record = _parse_json_line(text) if text.startswith("{") else _parse_nginx_line(text)
     return record
 
 
