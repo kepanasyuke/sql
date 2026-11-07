@@ -41,7 +41,7 @@ CLI, тесты и README с разбором решений. Внешних з�
 командой на чистой машине.
 
 ```bash
-python -m pytest -q          # 94 теста по всем проектам
+python -m pytest -q          # 642 теста: 94 в проектах и 548 в приложении
 ```
 
 ## Как это выглядит
@@ -49,6 +49,30 @@ python -m pytest -q          # 94 теста по всем проектам
 [![Карточки десяти проектов](docs/screenshots/preview-projects.png)](https://kepanasyuke.github.io/sql/#projects)
 
 [![Механизмы PostgreSQL: B-tree, seq scan против index scan, MVCC](docs/screenshots/preview-mech.png)](https://kepanasyuke.github.io/sql/#mech)
+
+## Приложение: sql-lint
+
+Отдельное приложение в `apps/sql_lint`: проверяет код на дисциплину оформления
+функций и даёт песочницу с данными.
+
+- **правила**: один выход на функцию (`return`, `break` и `while` считаются
+  выходом), тело 1–2 строки, без `continue`;
+- **песочница**: SQL из кода выполняется на демо-базе банка — таблица результатов
+  появляется по кнопке, «Показать базу» открывает таблицы с количеством строк и
+  предпросмотром;
+- **безопасность**: соединение только для чтения (`query_only`), разрешены
+  `SELECT`/`WITH`, лимит строк и таймаут;
+- **тесты**: 548, покрытие 91.3% — [сайт покрытия](https://kepanasyuke.github.io/sql/coverage/);
+- **сайт покрытия** собирается собственным сборщиком на `sys.monitoring`
+  (`apps/sql_lint/tools/coverage.py`), без внешних зависимостей.
+
+```bash
+python -m apps.sql_lint.cli serve --port 8766     # http://127.0.0.1:8766
+python -m apps.sql_lint.cli lint apps/sql_lint/rules.py
+python -m pytest apps/sql_lint/tests -q
+```
+
+[![Интерфейс sql-lint](docs/screenshots/app-ui.png)](apps/sql_lint/README.md)
 
 ## Проекты
 
@@ -95,6 +119,7 @@ python -m projects.perf_lab.cli bench --rows 20000 --repeats 5
 ## Структура
 
 ```
+apps/sql_lint/          приложение: линтер правил и песочница запросов
 projects/<project>/
 ├── <модуль>.py        логика
 ├── cli.py             командная строка
